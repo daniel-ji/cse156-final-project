@@ -1,5 +1,5 @@
 import csv
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import f1_score
 
 def load_data(filename):
     predictions, actuals = [], []
@@ -15,24 +15,18 @@ def load_data(filename):
     return predictions, actuals
 
 def calculate_metrics(predictions, actuals):
-    accuracy = accuracy_score(actuals, predictions)
-    precision = precision_score(actuals, predictions, average='weighted')
-    recall = recall_score(actuals, predictions, average='weighted')
     f1 = f1_score(actuals, predictions, average='weighted')
 
     # Exact match calculation
     exact_matches = sum(1 for i in range(len(predictions)) if predictions[i] == actuals[i])
     exact_match_score = exact_matches / len(predictions)
 
-    return accuracy, precision, recall, f1, exact_match_score
+    return f1, exact_match_score
 
 def main():
     predictions, actuals = load_data('raw_predictions.tsv')
-    accuracy, precision, recall, f1, exact_match_score = calculate_metrics(predictions, actuals)
+    f1, exact_match_score = calculate_metrics(predictions, actuals)
     
-    print("Accuracy:", accuracy)
-    print("Precision:", precision)
-    print("Recall:", recall)
     print("F1 Score:", f1)
     print("Exact Match Score:", exact_match_score)
 

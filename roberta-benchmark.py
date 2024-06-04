@@ -1,34 +1,80 @@
-import csv
-from sklearn.metrics import f1_score
+from transformers import AutoTokenizer, RobertaForMaskedLM
+import torch
+import json
 
-def load_data(filename):
-    predictions, actuals = [], []
-    with open(filename, mode='r', newline='', encoding='utf-8') as file:
-        reader = csv.reader(file, delimiter='\t')
-        for row in reader:
-            if len(row) == 2:  # Ensure there are exactly two columns
-                predictions.append(row[0])
-                actuals.append(row[1])
-            else: 
-                raise ValueError("Each row must contain exactly two columns.")
+# Load tokenizer and model
+tokenizer = AutoTokenizer.from_pretrained("FacebookAI/roberta-base")
+model = RobertaForMaskedLM.from_pretrained("FacebookAI/roberta-base").cuda()
 
-    return predictions, actuals
+# Load dataset
+dataset = None
+with open("dev.json", 'r') as file:
+    dataset = json.load(file)['data']
 
-def calculate_metrics(predictions, actuals):
-    f1 = f1_score(actuals, predictions, average='weighted')
+file_data = []
 
-    # Exact match calculation
-    exact_matches = sum(1 for i in range(len(predictions)) if predictions[i] == actuals[i])
-    exact_match_score = exact_matches / len(predictions)
+count = 0
+for sample in dataset:
+    if not sample['qas'][0]["answers"] or len(sample['qas'][0]["answers"][0]) == 0:
+        print("Skipping sample with no answers")
+        continue
 
-    return f1, exact_match_score
+    # Ensure entities are considered for predictions
+    entities_indexes = sample['passage']['entities']
+    entities = []
+    for index in entities_indexes:
+        entities.append(sample['passage']['text'][index['start']:(index['end']+1)])
 
-def main():
-    predictions, actuals = load_data('raw_predictions.tsv')
-    f1, exact_match_score = calculate_metrics(predictions, actuals)
-    
-    print("F1 Score:", f1)
-    print("Exact Match Score:", exact_match_score)
+    # Mask the query
+    masked_query = sample['qas'][0]['query'].replace("@placeholder", "<mask>")
+    # Combine the passage and query
+    query = sample['passage']['text'] + "\n\n" + masked_query
 
-if __name__ == "__main__":
-    main()
+    with torch.no_grad():
+        inputs = tokenizer(query, return_tensors="pt").to('cuda')
+        # Should be only one sample in the dev.json file with more than 512 tokens
+        if (len(inputs['input_ids'][0]) > 512):
+            print("Skipping sample with too long query")
+            continue
+
+        # Get the logits from the model of the masked token
+        outputs = model(**inputs)
+        mask_token_index = (inputs['input_ids'] == tokenizer.mask_token_id)[0].nonzero(as_tuple=True)[0]
+        logits = outputs.logits[0, mask_token_index][0]
+
+        # Get logits for each entity
+        entity_ids = [tokenizer.encode(entity, add_special_tokens=False) for entity in entities]
+
+        # Calculate likelihoods for each entity (average of the logits for each token in the entity)
+        likelihoods = []
+        for entity_id in entity_ids:
+            likelihood = 0
+            for token in entity_id:
+                likelihood += logits[token]
+            likelihoods.append(likelihood / len(entity_id))
+
+        # Get the entity with the highest likelihood
+        prediction = entities[likelihoods.index(max(likelihoods))]
+
+        file_data.append((query, prediction, sample['qas'][0]["answers"][0]["text"]))
+
+        # Write to file and log progress, every 100 samples
+        if count % 100 == 0:
+            print(f"Processed {count} samples")
+            # Write the results to a file
+            with open("predictions.txt", "a") as f:
+                for query, prediction, answer in file_data:
+                    f.write(f"Query: {query}\n")
+                    f.write(f"Prediction: {prediction}\n")
+                    f.write(f"Answer: {answer}\n")
+                    f.write("\n")
+
+            # Write raw results to a file (for further metric calculation)
+            with open("raw_predictions.tsv", "a") as f:
+                for _, prediction, answer in file_data:
+                    f.write(f"{prediction}\t{answer}\n")
+
+            file_data = []
+
+        count += 1
+
